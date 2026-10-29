@@ -91,7 +91,7 @@ jobs:
       CUSTOM_URL: ${{ inputs.download_url }}
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Build Dependencies
         run: |
