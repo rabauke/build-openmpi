@@ -159,40 +159,40 @@ jobs:
           GFORTRAN_VER=$(gfortran --version | head -n1)
           SHA256_VAL=$(cat "${CHECKSUM_NAME}")
 
-          cat <<EOF > release-notes.md
-## OpenMPI ${VERSION} (Linux x86_64)
+          cat <<EOF | sed "s/^ \{10\}//" > release-notes.md
+          ## OpenMPI ${VERSION} (Linux x86_64)
 
-Automated build of OpenMPI ${VERSION} for Linux x86_64.
+          Automated build of OpenMPI ${VERSION} for Linux x86_64.
 
-### Build Environment & Toolchain
-- **Runner**: Ubuntu 24.04 LTS (x86_64)
-- **Glibc**: \`${GLIBC_VER}\`
-- **C/C++ Compiler**: \`${GCC_VER}\`
-- **Fortran Compiler**: \`${GFORTRAN_VER}\`
-- **Installation Prefix**: \`/opt/openmpi\`
-- **PMIx / PRRTE**: Bundled internal runtimes
+          ### Build Environment & Toolchain
+          - **Runner**: Ubuntu 24.04 LTS (x86_64)
+          - **Glibc**: \`${GLIBC_VER}\`
+          - **C/C++ Compiler**: \`${GCC_VER}\`
+          - **Fortran Compiler**: \`${GFORTRAN_VER}\`
+          - **Installation Prefix**: \`/opt/openmpi\`
+          - **PMIx / PRRTE**: Bundled internal runtimes
 
-### SHA-256 Checksum
-\`\`\`
-${SHA256_VAL}
-\`\`\`
+          ### SHA-256 Checksum
+          \`\`\`
+          ${SHA256_VAL}
+          \`\`\`
 
-### Downstream Usage Quickstart
-To use these binaries in downstream CI workflows:
+          ### Downstream Usage Quickstart
+          To use these binaries in downstream CI workflows:
 
-\`\`\`yaml
-- name: Install OpenMPI ${VERSION}
-  run: |
-    curl -fSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ASSET_NAME}" -o "${ASSET_NAME}"
-    curl -fSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${CHECKSUM_NAME}" -o "${CHECKSUM_NAME}"
-    sha256sum -c "${CHECKSUM_NAME}"
-    sudo mkdir -p /opt/openmpi
-    sudo tar -xzf "${ASSET_NAME}" -C /opt
-    echo "/opt/openmpi/bin" >> \$GITHUB_PATH
-    echo "LD_LIBRARY_PATH=/opt/openmpi/lib:\${LD_LIBRARY_PATH:-}" >> \$GITHUB_ENV
-    echo "OPAL_PREFIX=/opt/openmpi" >> \$GITHUB_ENV
-\`\`\`
-EOF
+          \`\`\`yaml
+          - name: Install OpenMPI ${VERSION}
+            run: |
+              curl -fSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ASSET_NAME}" -o "${ASSET_NAME}"
+              curl -fSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${CHECKSUM_NAME}" -o "${CHECKSUM_NAME}"
+              sha256sum -c "${CHECKSUM_NAME}"
+              sudo mkdir -p /opt/openmpi
+              sudo tar -xzf "${ASSET_NAME}" -C /opt
+              echo "/opt/openmpi/bin" >> \$GITHUB_PATH
+              echo "LD_LIBRARY_PATH=/opt/openmpi/lib:\${LD_LIBRARY_PATH:-}" >> \$GITHUB_ENV
+              echo "OPAL_PREFIX=/opt/openmpi" >> \$GITHUB_ENV
+          \`\`\`
+          EOF
 
       - name: Publish Release and Upload Assets
         env:
