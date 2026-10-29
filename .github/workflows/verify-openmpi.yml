@@ -1,0 +1,139 @@
+name: Verify OpenMPI Downstream Consumption
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'OpenMPI Version to verify (e.g., 6.0.0rc1)'
+        required: true
+        default: '6.0.0rc1'
+        type: string
+      repository:
+        description: 'Repository hosting the release (owner/repo)'
+        required: false
+        default: ''
+        type: string
+  workflow_run:
+    workflows: ['Build OpenMPI 6']
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    name: Downstream Consumption Smoke Test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Resolve Version & Tag
+        id: resolve
+        run: |
+          RAW_VERSION="${{ inputs.version || '6.0.0rc1' }}"
+          VERSION="${RAW_VERSION#v}"
+          TAG="v${VERSION}"
+          TARGET_REPO="${{ inputs.repository || github.repository }}"
+          ASSET_NAME="openmpi-${VERSION}-linux-x86_64.tar.gz"
+          CHECKSUM_NAME="openmpi-${VERSION}-linux-x86_64.tar.gz.sha256"
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "repo=${TARGET_REPO}" >> "$GITHUB_OUTPUT"
+          echo "asset_name=${ASSET_NAME}" >> "$GITHUB_OUTPUT"
+          echo "checksum_name=${CHECKSUM_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Runtime Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            gfortran \
+            libevent-dev \
+            libhwloc-dev \
+            curl \
+            ca-certificates
+
+      - name: Download Release Assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          REPO: ${{ steps.resolve.outputs.repo }}
+          ASSET_NAME: ${{ steps.resolve.outputs.asset_name }}
+          CHECKSUM_NAME: ${{ steps.resolve.outputs.checksum_name }}
+        run: |
+          echo "Downloading ${ASSET_NAME} and ${CHECKSUM_NAME} from ${REPO} release ${TAG}..."
+          gh release download "${TAG}" --repo "${REPO}" -p "${ASSET_NAME}" -p "${CHECKSUM_NAME}"
+
+      - name: Verify Integrity & Install OpenMPI
+        env:
+          ASSET_NAME: ${{ steps.resolve.outputs.asset_name }}
+          CHECKSUM_NAME: ${{ steps.resolve.outputs.checksum_name }}
+        run: |
+          echo "Verifying SHA-256 checksum..."
+          sha256sum -c "${CHECKSUM_NAME}"
+
+          echo "Extracting binary archive to /opt/openmpi..."
+          sudo mkdir -p /opt/openmpi
+          sudo tar -xzf "${ASSET_NAME}" -C /opt
+
+          # Export downstream environment configuration
+          echo "/opt/openmpi/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=/opt/openmpi/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "OPAL_PREFIX=/opt/openmpi" >> "$GITHUB_ENV"
+
+      - name: Verify OpenMPI Environment & Version
+        run: |
+          export PATH="/opt/openmpi/bin:$PATH"
+          export LD_LIBRARY_PATH="/opt/openmpi/lib:${LD_LIBRARY_PATH:-}"
+          export OPAL_PREFIX="/opt/openmpi"
+
+          mpirun --version
+          mpicc --showme
+          mpifort --showme
+
+      - name: Test C MPI Application
+        run: |
+          export PATH="/opt/openmpi/bin:$PATH"
+          export LD_LIBRARY_PATH="/opt/openmpi/lib:${LD_LIBRARY_PATH:-}"
+          export OPAL_PREFIX="/opt/openmpi"
+
+          cat << 'EOF' > test_c.c
+          #include <mpi.h>
+          #include <stdio.h>
+
+          int main(int argc, char** argv) {
+              MPI_Init(&argc, &argv);
+              int rank, size;
+              MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+              MPI_Comm_size(MPI_COMM_WORLD, &size);
+              printf("Hello from C rank %d of %d\n", rank, size);
+              MPI_Finalize();
+              return 0;
+          }
+          EOF
+
+          mpicc test_c.c -o test_c
+          mpirun --allow-run-as-root -np 2 ./test_c
+
+      - name: Test Fortran MPI Application
+        run: |
+          export PATH="/opt/openmpi/bin:$PATH"
+          export LD_LIBRARY_PATH="/opt/openmpi/lib:${LD_LIBRARY_PATH:-}"
+          export OPAL_PREFIX="/opt/openmpi"
+
+          cat << 'EOF' > test_f.f90
+          program test_mpi
+              use mpi
+              implicit none
+              integer :: rank, size, ierr
+
+              call MPI_INIT(ierr)
+              call MPI_COMM_RANK(MPI_COMM_WORLD, rank, ierr)
+              call MPI_COMM_SIZE(MPI_COMM_WORLD, size, ierr)
+              print *, "Hello from Fortran rank ", rank, " of ", size
+              call MPI_FINALIZE(ierr)
+          end program test_mpi
+          EOF
+
+          mpifort test_f.f90 -o test_f
+          mpirun --allow-run-as-root -np 2 ./test_f

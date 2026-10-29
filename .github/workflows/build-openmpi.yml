@@ -1,0 +1,307 @@
+name: Build OpenMPI 6
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'OpenMPI Version / RC Tag (e.g., 6.0.0rc1)'
+        required: true
+        default: '6.0.0rc1'
+        type: string
+      download_url:
+        description: 'Direct tarball URL override (optional)'
+        required: false
+        default: ''
+        type: string
+      force_rebuild:
+        description: 'Force rebuild even if release asset exists'
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags:
+      - 'v6.*'
+      - 'v[0-9]+.*'
+
+permissions:
+  contents: write
+
+jobs:
+  check-existing:
+    name: Check Existing Release Assets
+    runs-on: ubuntu-26.04
+    outputs:
+      should_build: ${{ steps.guard.outputs.should_build }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      asset_name: ${{ steps.meta.outputs.asset_name }}
+      checksum_name: ${{ steps.meta.outputs.checksum_name }}
+    steps:
+      - name: Compute Metadata
+        id: meta
+        run: |
+          RAW_VERSION="${{ inputs.version || github.ref_name }}"
+          # Strip leading 'v' if present
+          VERSION="${RAW_VERSION#v}"
+          TAG="v${VERSION}"
+          ASSET_NAME="openmpi-${VERSION}-linux-x86_64.tar.gz"
+          CHECKSUM_NAME="openmpi-${VERSION}-linux-x86_64.tar.gz.sha256"
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "asset_name=${ASSET_NAME}" >> "$GITHUB_OUTPUT"
+          echo "checksum_name=${CHECKSUM_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Inspect Existing Release
+        id: guard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          ASSET_NAME: ${{ steps.meta.outputs.asset_name }}
+          FORCE: ${{ inputs.force_rebuild }}
+        run: |
+          if [ "${FORCE}" = "true" ]; then
+            echo "Force rebuild requested. Proceeding with build."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Checking if asset '${ASSET_NAME}' already exists in release '${TAG}'..."
+          EXISTING_ASSETS=$(gh release view "${TAG}" --json assets --jq '.assets.[].name' 2>/dev/null || true)
+
+          if echo "${EXISTING_ASSETS}" | grep -Fxq "${ASSET_NAME}"; then
+            echo "Asset '${ASSET_NAME}' already exists in release '${TAG}' and force_rebuild is false. Skipping build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Asset not found in release '${TAG}'. Proceeding with build."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build and Package OpenMPI
+    needs: check-existing
+    if: needs.check-existing.outputs.should_build == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.check-existing.outputs.version }}
+      TAG: ${{ needs.check-existing.outputs.tag }}
+      ASSET_NAME: ${{ needs.check-existing.outputs.asset_name }}
+      CHECKSUM_NAME: ${{ needs.check-existing.outputs.checksum_name }}
+      CUSTOM_URL: ${{ inputs.download_url }}
+    steps:
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            gfortran \
+            pkg-config \
+            libevent-dev \
+            libhwloc-dev \
+            curl \
+            ca-certificates
+
+      - name: Download OpenMPI Source Tarball
+        run: |
+          SERIES=$(echo "${VERSION}" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+          TARBALL="openmpi-${VERSION}.tar.gz"
+
+          if [ -n "${CUSTOM_URL}" ]; then
+            echo "Downloading from custom URL: ${CUSTOM_URL}"
+            curl -fSL "${CUSTOM_URL}" -o "${TARBALL}"
+          else
+            URL_GZ="https://download.open-mpi.org/release/open-mpi/v${SERIES}/openmpi-${VERSION}.tar.gz"
+            URL_BZ2="https://download.open-mpi.org/release/open-mpi/v${SERIES}/openmpi-${VERSION}.tar.bz2"
+
+            echo "Attempting download from: ${URL_GZ}"
+            if ! curl -fSL "${URL_GZ}" -o "${TARBALL}"; then
+              echo "Failed to download .tar.gz, attempting .tar.bz2 from: ${URL_BZ2}"
+              TARBALL="openmpi-${VERSION}.tar.bz2"
+              curl -fSL "${URL_BZ2}" -o "${TARBALL}"
+            fi
+          fi
+
+          mkdir -p src
+          tar -xf "${TARBALL}" -C src --strip-components=1
+
+      - name: Configure OpenMPI
+        run: |
+          cd src
+          ./configure \
+            --prefix=/opt/openmpi \
+            --enable-shared \
+            --disable-static \
+            --enable-mpi-fortran \
+            --with-pmix=internal \
+            --with-prrte=internal \
+            --disable-silent-rules
+
+      - name: Compile and Install
+        run: |
+          cd src
+          make -j"$(nproc)"
+          sudo make install
+
+      - name: Package Binary Tarball & Checksum
+        run: |
+          # Create compressed archive of /opt/openmpi
+          tar -czf "${ASSET_NAME}" -C /opt openmpi
+          sha256sum "${ASSET_NAME}" > "${CHECKSUM_NAME}"
+
+          echo "Package created: ${ASSET_NAME}"
+          cat "${CHECKSUM_NAME}"
+
+      - name: Generate Release Notes
+        run: |
+          GLIBC_VER=$(ldd --version | head -n1)
+          GCC_VER=$(gcc --version | head -n1)
+          GFORTRAN_VER=$(gfortran --version | head -n1)
+          SHA256_VAL=$(cat "${CHECKSUM_NAME}")
+
+          cat <<EOF > release-notes.md
+## OpenMPI ${VERSION} (Linux x86_64)
+
+Automated build of OpenMPI ${VERSION} for Linux x86_64.
+
+### Build Environment & Toolchain
+- **Runner**: Ubuntu 24.04 LTS (x86_64)
+- **Glibc**: \`${GLIBC_VER}\`
+- **C/C++ Compiler**: \`${GCC_VER}\`
+- **Fortran Compiler**: \`${GFORTRAN_VER}\`
+- **Installation Prefix**: \`/opt/openmpi\`
+- **PMIx / PRRTE**: Bundled internal runtimes
+
+### SHA-256 Checksum
+\`\`\`
+${SHA256_VAL}
+\`\`\`
+
+### Downstream Usage Quickstart
+To use these binaries in downstream CI workflows:
+
+\`\`\`yaml
+- name: Install OpenMPI ${VERSION}
+  run: |
+    curl -fSL "https://github.com/\${{ github.repository }}/releases/download/${TAG}/${ASSET_NAME}" -o "${ASSET_NAME}"
+    curl -fSL "https://github.com/\${{ github.repository }}/releases/download/${TAG}/${CHECKSUM_NAME}" -o "${CHECKSUM_NAME}"
+    sha256sum -c "${CHECKSUM_NAME}"
+    sudo mkdir -p /opt/openmpi
+    sudo tar -xzf "${ASSET_NAME}" -C /opt
+    echo "/opt/openmpi/bin" >> \$GITHUB_PATH
+    echo "LD_LIBRARY_PATH=/opt/openmpi/lib:\${LD_LIBRARY_PATH:-}" >> \$GITHUB_ENV
+    echo "OPAL_PREFIX=/opt/openmpi" >> \$GITHUB_ENV
+\`\`\`
+EOF
+
+      - name: Publish Release and Upload Assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PRERELEASE_FLAG=""
+          if echo "${VERSION}" | grep -Ei 'rc|alpha|beta|dev' >/dev/null 2>&1; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Updating existing release ${TAG}..."
+            gh release upload "${TAG}" "${ASSET_NAME}" "${CHECKSUM_NAME}" --clobber
+            gh release edit "${TAG}" --notes-file release-notes.md || true
+          else
+            echo "Creating release ${TAG}..."
+            gh release create "${TAG}" "${ASSET_NAME}" "${CHECKSUM_NAME}" \
+              --title "OpenMPI ${VERSION}" \
+              --notes-file release-notes.md \
+              ${PRERELEASE_FLAG}
+          fi
+
+  verify:
+    name: Verify OpenMPI Binaries
+    needs: [check-existing, build]
+    if: always() && !cancelled() && (needs.build.result == 'success' || (needs.build.result == 'skipped' && needs.check-existing.outputs.should_build == 'false'))
+    runs-on: ubuntu-26.04
+    env:
+      VERSION: ${{ needs.check-existing.outputs.version }}
+      TAG: ${{ needs.check-existing.outputs.tag }}
+      ASSET_NAME: ${{ needs.check-existing.outputs.asset_name }}
+      CHECKSUM_NAME: ${{ needs.check-existing.outputs.checksum_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Install Runtime Test Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            gfortran \
+            libevent-dev \
+            libhwloc-dev \
+            curl \
+            ca-certificates
+
+      - name: Download Release Assets
+        run: |
+          echo "Downloading ${ASSET_NAME} and ${CHECKSUM_NAME} from release ${TAG}..."
+          gh release download "${TAG}" -p "${ASSET_NAME}" -p "${CHECKSUM_NAME}"
+
+      - name: Verify Checksum and Extract
+        run: |
+          sha256sum -c "${CHECKSUM_NAME}"
+          sudo mkdir -p /opt/openmpi
+          sudo tar -xzf "${ASSET_NAME}" -C /opt
+
+      - name: Validate OpenMPI CLI and Information
+        run: |
+          export PATH="/opt/openmpi/bin:$PATH"
+          export LD_LIBRARY_PATH="/opt/openmpi/lib:${LD_LIBRARY_PATH:-}"
+          export OPAL_PREFIX="/opt/openmpi"
+
+          mpirun --version
+          mpicc --showme
+          mpifort --showme
+
+      - name: Compile and Run C MPI Program
+        run: |
+          export PATH="/opt/openmpi/bin:$PATH"
+          export LD_LIBRARY_PATH="/opt/openmpi/lib:${LD_LIBRARY_PATH:-}"
+          export OPAL_PREFIX="/opt/openmpi"
+
+          cat << 'EOF' > test_c.c
+          #include <mpi.h>
+          #include <stdio.h>
+
+          int main(int argc, char** argv) {
+              MPI_Init(&argc, &argv);
+              int rank, size;
+              MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+              MPI_Comm_size(MPI_COMM_WORLD, &size);
+              printf("Hello from C rank %d of %d\n", rank, size);
+              MPI_Finalize();
+              return 0;
+          }
+          EOF
+
+          mpicc test_c.c -o test_c
+          mpirun --allow-run-as-root -np 2 ./test_c
+
+      - name: Compile and Run Fortran MPI Program
+        run: |
+          export PATH="/opt/openmpi/bin:$PATH"
+          export LD_LIBRARY_PATH="/opt/openmpi/lib:${LD_LIBRARY_PATH:-}"
+          export OPAL_PREFIX="/opt/openmpi"
+
+          cat << 'EOF' > test_f.f90
+          program test_mpi
+              use mpi
+              implicit none
+              integer :: rank, size, ierr
+
+              call MPI_INIT(ierr)
+              call MPI_COMM_RANK(MPI_COMM_WORLD, rank, ierr)
+              call MPI_COMM_SIZE(MPI_COMM_WORLD, size, ierr)
+              print *, "Hello from Fortran rank ", rank, " of ", size
+              call MPI_FINALIZE(ierr)
+          end program test_mpi
+          EOF
+
+          mpifort test_f.f90 -o test_f
+          mpirun --allow-run-as-root -np 2 ./test_f
