@@ -230,6 +230,9 @@ jobs:
       CHECKSUM_NAME: ${{ needs.check-existing.outputs.checksum_name }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
       - name: Install Runtime Test Dependencies
         run: |
           sudo apt-get update
