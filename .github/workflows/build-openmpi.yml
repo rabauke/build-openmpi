@@ -29,7 +29,7 @@ permissions:
 jobs:
   check-existing:
     name: Check Existing Release Assets
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     outputs:
       should_build: ${{ steps.guard.outputs.should_build }}
       version: ${{ steps.meta.outputs.version }}
@@ -81,7 +81,7 @@ jobs:
     name: Build and Package OpenMPI
     needs: check-existing
     if: needs.check-existing.outputs.should_build == 'true'
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
       VERSION: ${{ needs.check-existing.outputs.version }}
@@ -183,8 +183,8 @@ To use these binaries in downstream CI workflows:
 \`\`\`yaml
 - name: Install OpenMPI ${VERSION}
   run: |
-    curl -fSL "https://github.com/\${{ github.repository }}/releases/download/${TAG}/${ASSET_NAME}" -o "${ASSET_NAME}"
-    curl -fSL "https://github.com/\${{ github.repository }}/releases/download/${TAG}/${CHECKSUM_NAME}" -o "${CHECKSUM_NAME}"
+    curl -fSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ASSET_NAME}" -o "${ASSET_NAME}"
+    curl -fSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${CHECKSUM_NAME}" -o "${CHECKSUM_NAME}"
     sha256sum -c "${CHECKSUM_NAME}"
     sudo mkdir -p /opt/openmpi
     sudo tar -xzf "${ASSET_NAME}" -C /opt
@@ -219,7 +219,7 @@ EOF
     name: Verify OpenMPI Binaries
     needs: [check-existing, build]
     if: always() && !cancelled() && (needs.build.result == 'success' || (needs.build.result == 'skipped' && needs.check-existing.outputs.should_build == 'false'))
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     env:
       VERSION: ${{ needs.check-existing.outputs.version }}
       TAG: ${{ needs.check-existing.outputs.tag }}
