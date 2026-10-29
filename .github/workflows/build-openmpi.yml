@@ -90,6 +90,9 @@ jobs:
       CHECKSUM_NAME: ${{ needs.check-existing.outputs.checksum_name }}
       CUSTOM_URL: ${{ inputs.download_url }}
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Install Build Dependencies
         run: |
           sudo apt-get update
