@@ -124,6 +124,12 @@ jobs:
 
       - name: Configure MPICH
         run: |
+          LIBFABRIC_PC_DIR="$(pkg-config --variable=pcfiledir libfabric)"
+          mkdir -p "${RUNNER_TEMP}/mpich-pkgconfig"
+          sed '/^Libs\.private:/d' "${LIBFABRIC_PC_DIR}/libfabric.pc" \
+            > "${RUNNER_TEMP}/mpich-pkgconfig/libfabric.pc"
+          export PKG_CONFIG_PATH="${RUNNER_TEMP}/mpich-pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+
           cd src
           ./configure \
             --prefix=/opt/mpich \
