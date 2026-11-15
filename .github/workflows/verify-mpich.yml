@@ -1,0 +1,131 @@
+name: Verify MPICH Downstream Consumption
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'MPICH Version to verify (e.g., 4.2.3)'
+        required: true
+        default: '4.2.3'
+        type: string
+      repository:
+        description: 'Repository hosting the release (owner/repo)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    name: Downstream Consumption Smoke Test
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Resolve Version and Release
+        id: resolve
+        env:
+          RAW_VERSION: ${{ inputs.version }}
+          TARGET_REPO: ${{ inputs.repository || github.repository }}
+        run: |
+          VERSION="${RAW_VERSION#v}"
+          if [[ ! "${VERSION}" =~ ^[0-9]+([.][0-9A-Za-z-]+)*$ ]]; then
+            echo "Invalid MPICH version: ${RAW_VERSION}" >&2
+            exit 1
+          fi
+          if [[ ! "${TARGET_REPO}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "Invalid repository: ${TARGET_REPO}" >&2
+            exit 1
+          fi
+
+          TAG="v${VERSION}"
+          ASSET_NAME="mpich-${VERSION}-linux-x86_64.tar.gz"
+          CHECKSUM_NAME="${ASSET_NAME}.sha256"
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "repo=${TARGET_REPO}" >> "$GITHUB_OUTPUT"
+          echo "asset_name=${ASSET_NAME}" >> "$GITHUB_OUTPUT"
+          echo "checksum_name=${CHECKSUM_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Runtime Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            gfortran \
+            libfabric-dev \
+            libhwloc-dev \
+            ca-certificates
+
+      - name: Download Release Assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          REPO: ${{ steps.resolve.outputs.repo }}
+          ASSET_NAME: ${{ steps.resolve.outputs.asset_name }}
+          CHECKSUM_NAME: ${{ steps.resolve.outputs.checksum_name }}
+        run: |
+          echo "Downloading ${ASSET_NAME} and ${CHECKSUM_NAME} from ${REPO} release ${TAG}..."
+          gh release download "${TAG}" --repo "${REPO}" -p "${ASSET_NAME}" -p "${CHECKSUM_NAME}"
+
+      - name: Verify Checksum and Install MPICH
+        env:
+          ASSET_NAME: ${{ steps.resolve.outputs.asset_name }}
+          CHECKSUM_NAME: ${{ steps.resolve.outputs.checksum_name }}
+        run: |
+          sha256sum -c "${CHECKSUM_NAME}"
+          sudo tar -xzf "${ASSET_NAME}" -C /opt
+
+          echo "/opt/mpich/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=/opt/mpich/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Verify MPICH Commands
+        run: |
+          mpichversion
+          mpiexec --version
+          mpicc -show
+          mpifort -show
+
+      - name: Test C MPI Application
+        run: |
+          cat << 'EOF' > test_c.c
+          #include <mpi.h>
+          #include <stdio.h>
+
+          int main(int argc, char** argv) {
+              MPI_Init(&argc, &argv);
+              int rank, size;
+              MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+              MPI_Comm_size(MPI_COMM_WORLD, &size);
+              printf("Hello from C rank %d of %d\n", rank, size);
+              MPI_Finalize();
+              return 0;
+          }
+          EOF
+
+          mpicc test_c.c -o test_c
+          C_OUTPUT=$(mpiexec -n 2 ./test_c)
+          printf '%s\n' "${C_OUTPUT}"
+          test "$(printf '%s\n' "${C_OUTPUT}" | grep -Ec 'of 2[[:space:]]*$')" -eq 2
+
+      - name: Test Fortran MPI Application
+        run: |
+          cat << 'EOF' > test_f.f90
+          program test_mpi
+              use mpi
+              implicit none
+              integer :: rank, size, ierr
+
+              call MPI_INIT(ierr)
+              call MPI_COMM_RANK(MPI_COMM_WORLD, rank, ierr)
+              call MPI_COMM_SIZE(MPI_COMM_WORLD, size, ierr)
+              print *, "Hello from Fortran rank ", rank, " of ", size
+              call MPI_FINALIZE(ierr)
+          end program test_mpi
+          EOF
+
+          mpifort test_f.f90 -o test_f
+          F_OUTPUT=$(mpiexec -n 2 ./test_f)
+          printf '%s\n' "${F_OUTPUT}"
+          test "$(printf '%s\n' "${F_OUTPUT}" | grep -Ec 'of[[:space:]]+2[[:space:]]*$')" -eq 2

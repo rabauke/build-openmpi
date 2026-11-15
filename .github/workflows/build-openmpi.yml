@@ -18,10 +18,6 @@ on:
         required: false
         default: false
         type: boolean
-  push:
-    tags:
-      - 'v6.*'
-      - 'v[0-9]+.*'
 
 permissions:
   contents: write

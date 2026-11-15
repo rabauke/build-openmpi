@@ -1,0 +1,299 @@
+name: Build MPICH
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'MPICH Version (e.g., 4.2.3)'
+        required: true
+        default: '4.2.3'
+        type: string
+      download_url:
+        description: 'Direct source tarball URL override (optional)'
+        required: false
+        default: ''
+        type: string
+      force_rebuild:
+        description: 'Force rebuild even if release asset exists'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  check-existing:
+    name: Check Existing Release Assets
+    runs-on: ubuntu-26.04
+    outputs:
+      should_build: ${{ steps.guard.outputs.should_build }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      asset_name: ${{ steps.meta.outputs.asset_name }}
+      checksum_name: ${{ steps.meta.outputs.checksum_name }}
+    steps:
+      - name: Compute Metadata
+        id: meta
+        env:
+          RAW_VERSION: ${{ inputs.version }}
+        run: |
+          VERSION="${RAW_VERSION#v}"
+          if [[ ! "${VERSION}" =~ ^[0-9]+([.][0-9A-Za-z-]+)*$ ]]; then
+            echo "Invalid MPICH version: ${RAW_VERSION}" >&2
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          ASSET_NAME="mpich-${VERSION}-linux-x86_64.tar.gz"
+          CHECKSUM_NAME="${ASSET_NAME}.sha256"
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "asset_name=${ASSET_NAME}" >> "$GITHUB_OUTPUT"
+          echo "checksum_name=${CHECKSUM_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Inspect Existing Release
+        id: guard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          ASSET_NAME: ${{ steps.meta.outputs.asset_name }}
+          CHECKSUM_NAME: ${{ steps.meta.outputs.checksum_name }}
+          FORCE: ${{ inputs.force_rebuild }}
+        run: |
+          if [ "${FORCE}" = "true" ]; then
+            echo "Force rebuild requested. Proceeding with build."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Checking if asset '${ASSET_NAME}' already exists in release '${TAG}'..."
+          EXISTING_ASSETS=$(gh release view "${TAG}" --json assets --jq '.assets.[].name' 2>/dev/null || true)
+
+          if echo "${EXISTING_ASSETS}" | grep -Fxq "${ASSET_NAME}" \
+            && echo "${EXISTING_ASSETS}" | grep -Fxq "${CHECKSUM_NAME}"; then
+            echo "Both '${ASSET_NAME}' and '${CHECKSUM_NAME}' already exist in release '${TAG}' and force_rebuild is false. Skipping build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Asset not found in release '${TAG}'. Proceeding with build."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build and Package MPICH
+    needs: check-existing
+    if: needs.check-existing.outputs.should_build == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.check-existing.outputs.version }}
+      TAG: ${{ needs.check-existing.outputs.tag }}
+      ASSET_NAME: ${{ needs.check-existing.outputs.asset_name }}
+      CHECKSUM_NAME: ${{ needs.check-existing.outputs.checksum_name }}
+      CUSTOM_URL: ${{ inputs.download_url }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            gfortran \
+            libfabric-dev \
+            libhwloc-dev \
+            curl \
+            ca-certificates
+
+      - name: Download MPICH Source Tarball
+        run: |
+          TARBALL="mpich-${VERSION}.tar.gz"
+
+          if [ -n "${CUSTOM_URL}" ]; then
+            echo "Downloading from custom URL: ${CUSTOM_URL}"
+            curl -fSL "${CUSTOM_URL}" -o "${TARBALL}"
+          else
+            URL="https://www.mpich.org/static/downloads/${VERSION}/mpich-${VERSION}.tar.gz"
+            echo "Downloading from: ${URL}"
+            curl -fSL "${URL}" -o "${TARBALL}"
+          fi
+
+          mkdir -p src
+          tar -xf "${TARBALL}" -C src --strip-components=1
+
+      - name: Configure MPICH
+        run: |
+          cd src
+          ./configure \
+            --prefix=/opt/mpich \
+            --with-device=ch4:ofi \
+            --enable-shared \
+            --disable-static
+
+      - name: Compile and Install
+        run: |
+          cd src
+          make -j"$(nproc)"
+          sudo make install
+
+      - name: Package Binary Tarball and Checksum
+        run: |
+          tar -czf "${ASSET_NAME}" -C /opt mpich
+          sha256sum "${ASSET_NAME}" > "${CHECKSUM_NAME}"
+
+          echo "Package created: ${ASSET_NAME}"
+          cat "${CHECKSUM_NAME}"
+
+      - name: Generate Release Notes
+        run: |
+          RUNNER_OS=$(source /etc/os-release && echo "${PRETTY_NAME}")
+          GCC_VER=$(gcc --version | head -n1)
+          GFORTRAN_VER=$(gfortran --version | head -n1)
+          SHA256_VAL=$(cat "${CHECKSUM_NAME}")
+
+          cat <<EOF | sed "s/^ \{10\}//" > release-notes.md
+          ## MPICH ${VERSION} (Linux x86_64)
+
+          Automated build of MPICH ${VERSION} for Linux x86_64.
+
+          ### Build Environment & Toolchain
+          - **Runner**: ${RUNNER_OS} (x86_64)
+          - **C/C++ Compiler**: \`${GCC_VER}\`
+          - **Fortran Compiler**: \`${GFORTRAN_VER}\`
+          - **Installation Prefix**: \`/opt/mpich\`
+          - **Device**: CH4:OFI
+
+          ### SHA-256 Checksum
+          \`\`\`
+          ${SHA256_VAL}
+          \`\`\`
+          EOF
+
+      - name: Publish Release and Upload Assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PRERELEASE_FLAG=""
+          if echo "${VERSION}" | grep -Ei 'rc|alpha|beta|dev' >/dev/null 2>&1; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Updating existing release ${TAG}..."
+            gh release upload "${TAG}" "${ASSET_NAME}" "${CHECKSUM_NAME}" --clobber
+            gh release edit "${TAG}" --notes-file release-notes.md || true
+          else
+            echo "Creating new release ${TAG}..."
+            gh release create "${TAG}" \
+              "${ASSET_NAME}" \
+              "${CHECKSUM_NAME}" \
+              --title "MPICH ${VERSION}" \
+              --notes-file release-notes.md \
+              ${PRERELEASE_FLAG}
+          fi
+
+  verify:
+    name: Verify Published MPICH Package
+    needs: [check-existing, build]
+    if: always() && !cancelled() && (needs.build.result == 'success' || (needs.build.result == 'skipped' && needs.check-existing.outputs.should_build == 'false'))
+    runs-on: ubuntu-26.04
+    env:
+      VERSION: ${{ needs.check-existing.outputs.version }}
+      TAG: ${{ needs.check-existing.outputs.tag }}
+      ASSET_NAME: ${{ needs.check-existing.outputs.asset_name }}
+      CHECKSUM_NAME: ${{ needs.check-existing.outputs.checksum_name }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Install Runtime Test Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            gfortran \
+            libfabric-dev \
+            libhwloc-dev \
+            ca-certificates
+
+      - name: Download Release Assets
+        run: |
+          echo "Downloading ${ASSET_NAME} and ${CHECKSUM_NAME} from release ${TAG}..."
+          gh release download "${TAG}" -p "${ASSET_NAME}" -p "${CHECKSUM_NAME}"
+
+      - name: Verify Checksum and Extract
+        run: |
+          sha256sum -c "${CHECKSUM_NAME}"
+          sudo tar -xzf "${ASSET_NAME}" -C /opt
+          echo "/opt/mpich/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=/opt/mpich/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+
+      - name: Validate MPICH Commands
+        run: |
+          mpichversion
+          mpiexec --version
+          mpicc -show
+          mpifort -show
+
+      - name: Compile and Run C MPI Program
+        run: |
+          cat << 'EOF' > test_c.c
+          #include <mpi.h>
+          #include <stdio.h>
+
+          int main(int argc, char** argv) {
+              MPI_Init(&argc, &argv);
+              int rank, size;
+              MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+              MPI_Comm_size(MPI_COMM_WORLD, &size);
+              printf("Hello from C rank %d of %d\n", rank, size);
+              MPI_Finalize();
+              return 0;
+          }
+          EOF
+
+          mpicc test_c.c -o test_c
+          C_OUTPUT=$(mpiexec -n 2 ./test_c)
+          printf '%s\n' "${C_OUTPUT}"
+          test "$(printf '%s\n' "${C_OUTPUT}" | grep -Ec 'of 2[[:space:]]*$')" -eq 2
+
+      - name: Compile and Run Fortran MPI Program
+        run: |
+          cat << 'EOF' > test_f.f90
+          program test_mpi
+              use mpi
+              implicit none
+              integer :: rank, size, ierr
+
+              call MPI_INIT(ierr)
+              call MPI_COMM_RANK(MPI_COMM_WORLD, rank, ierr)
+              call MPI_COMM_SIZE(MPI_COMM_WORLD, size, ierr)
+              print *, "Hello from Fortran rank ", rank, " of ", size
+              call MPI_FINALIZE(ierr)
+          end program test_mpi
+          EOF
+
+          mpifort test_f.f90 -o test_f
+          F_OUTPUT=$(mpiexec -n 2 ./test_f)
+          printf '%s\n' "${F_OUTPUT}"
+          test "$(printf '%s\n' "${F_OUTPUT}" | grep -Ec 'of[[:space:]]+2[[:space:]]*$')" -eq 2
+
+  dispatch-downstream-verification:
+    name: Dispatch Downstream Verification
+    needs: [check-existing, build, verify]
+    if: always() && !cancelled() && needs.verify.result == 'success' && (needs.build.result == 'success' || (needs.build.result == 'skipped' && needs.check-existing.outputs.should_build == 'false'))
+    runs-on: ubuntu-26.04
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.check-existing.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Trigger Downstream Verification
+        run: |
+          gh workflow run verify-mpich.yml \
+            --ref "${GITHUB_REF_NAME}" \
+            -f version="${VERSION}" \
+            -f repository="${GITHUB_REPOSITORY}"
