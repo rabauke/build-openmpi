@@ -311,3 +311,24 @@ jobs:
 
           mpifort test_f.f90 -o test_f
           mpirun --allow-run-as-root -np 2 ./test_f
+
+  dispatch-downstream-verification:
+    name: Dispatch Downstream Verification
+    needs: [check-existing, build]
+    if: always() && !cancelled() && (needs.build.result == 'success' || (needs.build.result == 'skipped' && needs.check-existing.outputs.should_build == 'false'))
+    runs-on: ubuntu-26.04
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      VERSION: ${{ needs.check-existing.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Trigger Downstream Verification
+        run: |
+          gh workflow run verify-openmpi.yml \
+            --ref "${GITHUB_REF_NAME}" \
+            -f version="${VERSION}" \
+            -f repository="${GITHUB_REPOSITORY}"

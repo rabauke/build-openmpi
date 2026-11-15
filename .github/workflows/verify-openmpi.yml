@@ -13,11 +13,6 @@ on:
         required: false
         default: ''
         type: string
-  workflow_run:
-    workflows: ['Build OpenMPI 6']
-    types:
-      - completed
-
 permissions:
   contents: read
 
