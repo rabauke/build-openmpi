@@ -24,7 +24,7 @@ permissions:
 jobs:
   smoke-test:
     name: Downstream Consumption Smoke Test
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Resolve Version & Tag
         id: resolve
